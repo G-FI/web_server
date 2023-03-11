@@ -18,9 +18,9 @@
 
 #include<sys/wait.h>
 
+#include "threadpool.h"
 #include "http_request.h"
 #include "util.h"
-#include "threadpool.h"
 
 /**
  * 统一事件源就是信号处理不是在单独的信号处理函数中，
@@ -33,6 +33,7 @@
 static int pipefd[2];
 #define MAX_EVENt_NUMBER 1024
 #define MAX_FD 65536
+HttpRequest* requests = nullptr;
 
 //信号处理函数
 void sig_handler(int sig){
@@ -42,10 +43,6 @@ void sig_handler(int sig){
     errno = saved_errno;
 }
 
-//多进程编程，回收子进程资源
-void sig_child_handler(int sig){
-    int child_pid = waitpid(-1, NULL, WNOHANG);
-}
 
 //添加信号监听
 void addsig(int sig, void (*handler)(int sig)){
@@ -61,17 +58,19 @@ void addsig(int sig, void (*handler)(int sig)){
 }
 
 
+void timer_handler(){
 
-int main(int argc, char **argv){
+    int start = TimerHeapThreadSafe::GetInstance()->Tick();
+    //获取堆顶的时钟，定时下一次
+    int interval = TimerHeapThreadSafe::GetInstance()->MinTime(start);
+    
+    alarm(interval);
+}
 
-    if(argc <= 2){
-        printf("usage: %s ip_address port_number", argv[0]);
-        exit(-1);
-    }
+int config_listen(char *cip, char* cport){
 
-    char *ip = argv[1];
-    int port = atoi(argv[2]);
-    int backlog = 5; //atoi(argv[3]);
+
+    int port = atoi(cport);
 
     //1. 创建socket fd
     int listen_fd = socket(PF_INET, SOCK_STREAM, 0); //创建socket，Protocol family
@@ -80,7 +79,7 @@ int main(int argc, char **argv){
     //2. 创建地址
     struct sockaddr_in sock_addr;
     sock_addr.sin_family = AF_INET;
-    inet_pton(AF_INET, ip, &sock_addr.sin_addr);
+    inet_pton(AF_INET, cip, &sock_addr.sin_addr);
     sock_addr.sin_port = htons(port);
 
     int ret = 0;
@@ -92,26 +91,71 @@ int main(int argc, char **argv){
     assert(ret != -1);
 
     //4. 监听socket
-    ret = listen(listen_fd, backlog);
+    ret = listen(listen_fd, 5);
     assert(ret != -1);
+    return listen_fd;
+}
 
-    //5.创建内核事件监听表
+int accept_conn(int listenfd, int epollfd){
+    int conn_fd = accept(listenfd, nullptr, nullptr);
+    if(conn_fd <= 0)
+        return -1;
+    addfd(epollfd, conn_fd); 
+    
+    Timer* timer = new Timer(requests + conn_fd, TIME_OUT);
+    //初始化请求
+    requests[conn_fd].InitRequest(epollfd, conn_fd, timer);
+    
+    //添加计时器
+    TimerHeapThreadSafe::GetInstance()->AddTimer(timer);
+    //如果之前由计时说明已有计时器启动，则继续计时，若没有，则新开启一个计时
+    int pre = alarm(0);
+    if(pre == 0){
+        alarm(TIME_OUT);
+    }
+    else{
+        alarm(pre);
+    }
+}
+
+int main(int argc, char **argv){
+    if(argc <= 2){
+        printf("usage: %s ip_address port_number", argv[0]);
+        exit(-1);
+    }
+
+    //1. 创建监听socket
+    int listenfd = config_listen(argv[1], argv[2]);
+
+    //2.创建内核事件监听表
     struct epoll_event events[MAX_EVENt_NUMBER];
     int epollfd = epoll_create1(0); 
     assert(epollfd != -1);
 
-    //5. 注册epoll监听事件，监听listen端口
-    addfd(epollfd, listen_fd);
+    //3. 注册epoll监听事件，监听listen端口
+    addfd(epollfd, listenfd, false);
 
-    HttpRequest* requests = new HttpRequest[MAX_FD];
-
+    //4. 创建客户请求数组，使用sockfd下标访问
+    requests = new HttpRequest[MAX_FD];
+    //5. 创建线程池
     ThreadPool * pool = ThreadPool::GetInstance(5);
 
-    bool stop_server = false;
-    while(!stop_server){
-        int number = epoll_wait(epollfd, events, MAX_EVENt_NUMBER, -1);
+    int ret = 0;
+    //6. 统一事件源
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, pipefd);
+    assert(ret != -1);
 
-        if(number < 0 && errno != EINTR){ //被信号中断时设置errno为EINTR
+    //7. 注册信号事件
+    addsig(SIGALRM, sig_handler);
+    addfd(epollfd, pipefd[0]);
+
+    bool stop_server = false;
+    bool time_out = false;
+    while(!stop_server){
+        
+        time_out = false;
+        int number = epoll_wait(epollfd, events, MAX_EVENt_NUMBER, -1);
+        if(number < 0 && errno != EINTR){ //被信号中断时设置errno为EINTR X, 信号一般开启RESTART，能恢复被中断的系统调用
             printf("epoll_wait failure\n");
             exit(-1);
         }
@@ -119,51 +163,33 @@ int main(int argc, char **argv){
         for(int i = 0; i < number; ++i){
             int sockfd = events[i].data.fd;
             
-            //处理监听
-            if(sockfd == listen_fd){
-                struct sockaddr_in client_addr;
-                socklen_t client_addr_len = sizeof(client_addr);
-                int conn_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &client_addr_len);
-                if(conn_fd <= 0)
-                    continue;
-                addfd(epollfd, conn_fd); 
-                requests[conn_fd].InitRequest(epollfd, conn_fd);
+            //Accept
+            if(sockfd == listenfd){
+                accept_conn(listenfd, epollfd);
             }
-            /*
             //信号处理
             else if(sockfd == pipefd[0] && events[i].events & EPOLLIN){
                 char signal[1024];
 
                 int ret = recv(pipefd[0], signal, sizeof(signal), 0);
-                if(ret == -1){ //没有读到信号,出错
-                    continue;
-                }
-                else if(ret == 0){//信号读取完
+                if(ret == -1 || ret == 0){ //没有读到信号,出错 //信号读取完
                     continue;
                 }
                 else{//ret为接收到信号的数量
                     for(int j = 0; j < ret; ++j){
-                        printf("%d, %d\n", j, ret);
                         switch (signal[j])
                         {
-                        case SIGCHLD:
-                            printf("SIGCHLD\n");
-                            continue;
-                        case SIGHUP:
-                            printf("SIGHUP\n");
-                            continue;
-                        case SIGTERM:
-                        case SIGINT:
-                            printf("STOP SERVER\n");
-                            stop_server = true;
+                        case SIGALRM:
+                            time_out = true;
                             break;
+                        default:
+                            stop_server = true;
                         }
                     }
 
                 }
 
             }
-            */
             //客户连接关闭
             else if(events[i].events & (EPOLLERR | EPOLLRDHUP | EPOLLHUP)){
                 requests[sockfd].EndRequest();
@@ -172,13 +198,16 @@ int main(int argc, char **argv){
             else if(events[i].events & EPOLLIN){
                 pool->Append(requests + sockfd);
             }
-
         }
 
+        //定时事件优先级比I/O事件低，可能造成一点偏差
+        if(time_out == true){
+            timer_handler();
+        }
     }
 
     delete [] requests;
-    close(listen_fd);
+    close(listenfd);
     close(pipefd[0]);
     close(pipefd[1]);
 

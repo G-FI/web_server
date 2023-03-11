@@ -1,16 +1,16 @@
-#include "../timer.h"
+#include "../src/timer.h"
+#include "../src/http_request.h"
+
 
 #include<vector>
 using namespace std;
 
 int main(){
     sockaddr_in addr;
-    vector<UserData> users(10, UserData(1, addr));
-    for(int i = 0; i < 10; ++i){
-        users[i].sockfd = i;
-    }
+    vector<HttpRequest> users(10);
 
-    TimerHeap timer_heap;
+
+    TimerHeapThreadSafe timer_heap;
     timer_heap.AddTimer(&users[0], 1);
     timer_heap.AddTimer(&users[1], 2);
     timer_heap.AddTimer(&users[2], 3);
@@ -25,5 +25,9 @@ int main(){
     while(true){
         timer_heap.Tick();
     }
+
+    Request req;
+    req.DoRequest();
+    req.DoTimer();
 
 }

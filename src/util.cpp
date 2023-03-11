@@ -12,11 +12,11 @@ int setnonblocking(int fd){
 void addfd(int epollfd, int fd, bool one_shot){
     struct epoll_event event;
     event.data.fd = fd;
+    event.events = EPOLLIN | EPOLLET; //监测 数据可读事件 和 边沿触发(事件发生时只触发一次)
     if(one_shot){
         event.events |= EPOLLONESHOT;
     }
 
-    event.events |= EPOLLIN | EPOLLET; //监测 数据可读事件 和 边沿触发(事件发生时只触发一次)
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
     //事件就绪 + 非阻塞I/O
     setnonblocking(fd);

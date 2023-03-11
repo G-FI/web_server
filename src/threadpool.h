@@ -41,10 +41,11 @@ private:
     //静态单例
     static ThreadPool*      instance;
 
+    int                     cur_request;
     int                     m_max_request;
     int                     m_thread_number;
     
-    list<Request*>          m_request_queue; //工作队列
+    list<Request*>         m_request_queue; //工作队列
     vector<thread>          m_workers;     //工作线程
 
     condition_variable      m_cond;     
@@ -59,6 +60,7 @@ ThreadPool* ThreadPool::instance = nullptr;
 ThreadPool::ThreadPool(int thread_number, int max_request){
     assert(thread_number > 0 && max_request > 0);
 
+    cur_request = 0;
     m_stop = false;
     m_max_request = max_request <= MAX_REQUEST? max_request : MAX_REQUEST;
     m_thread_number = thread_number < MAX_THREAD? thread_number: MAX_THREAD;
@@ -87,6 +89,8 @@ void ThreadPool::work(){
             //拿取请求
             request = m_request_queue.front();
             this->m_request_queue.pop_front();
+            //--this->cur_request;
+
         }
         //do request
         request->DoRequest();
@@ -104,7 +108,7 @@ bool ThreadPool::Append(Request* request){
     if(m_request_queue.size() > m_max_request)
         return false;
     m_request_queue.push_back(request);
-    
+    ++this->cur_request;
     m_cond.notify_one();
 
     return true; 

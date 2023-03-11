@@ -1,9 +1,5 @@
 #include "http_request.h"
-
-#include "string.h"
-
-#include <fcntl.h>
-
+#include "util.h"
 
 const char* HttpRequest::not_found_path = "/home/hpy/var/www/html/not_found.html";
 const char* HttpRequest::root = "/home/hpy/var/www/html";
@@ -13,7 +9,62 @@ HttpRequest::HttpRequest(){
 
 HttpRequest::~HttpRequest(){}
 
-void HttpRequest::InitRequest(int epollfd, int sockfd){
+void HttpRequest::DoRequest(){
+    //0. 从定时器堆中删除自身定时器
+    bool ret = TimerHeapThreadSafe::GetInstance()->RemoveTimer(this->timer);
+    
+    if(ret == false){   //该请求已经/正在被定时器处理，请求已过期
+        return;
+    }
+
+    fprintf(stderr, "Get The Reqeust, Remove the Timer\n");
+   
+    //1. 读取数据
+    ret = this->read();
+    if(!ret){
+        this->closeConnection();
+        return;
+    }
+
+    //2. 解析数据
+    HTTP_STATUS status = this->parseHttp();
+
+    //3.1 请求头还没有接受完,重新注册sockfd上的读事件(主要是清除EPOLLONESHOT)
+    if(status == NO_REQUEST){
+        modfd(this->epollfd, this->sockfd, EPOLLIN | EPOLLET | EPOLLONESHOT);  
+        
+        this->timer->Reset(this, TIME_OUT);
+        TimerHeapThreadSafe::GetInstance()->AddTimer(this->timer);
+        return;
+    }
+    //3.2 解析结束，doRequest查找对应的请求文件，并映射
+    else if(status == GET_REQUEST){
+        status = this->doRequest();
+    }
+
+    //4. 处理请求
+    this->doRespond(status);
+
+    //5. 写回数据
+    this->write();
+
+    //6. 写完数据根据是否长连接来决定关闭
+    if(this->keep_alive){
+        this->timer->Reset(this, TIME_OUT);
+        TimerHeapThreadSafe::GetInstance()->AddTimer(this->timer);
+    }
+    else{
+        this->closeConnection();
+    }
+}
+
+void HttpRequest::DoTimer(){
+    fprintf(stderr, "[HTTP Connection Timer done]: %d\n ", this->sockfd);
+    this->closeConnection();
+}
+
+
+void HttpRequest::InitRequest(int epollfd, int sockfd, Timer* timer_){
     //fd相关
     this->epollfd = epollfd;
     this->sockfd = sockfd;
@@ -29,13 +80,16 @@ void HttpRequest::InitRequest(int epollfd, int sockfd){
     this->method = GET;
     this->uri.resize(0);
     this->host.resize(0);
-    this->keep_alive = false;
+    this->keep_alive = true;
 
     //响应数据相关
     this->write_size = 0;
     this->file_addr = nullptr;
     this->file_size = 0;
     memset(this->write_buf, 0, BUFFERSZ);    
+
+    //定时器
+    this->timer = timer_;
 }
 
 
@@ -102,12 +156,13 @@ HttpRequest::HTTP_STATUS HttpRequest::parseHttpRequestLine(char *line){
     this->uri = filed;
     
     filed  = strtok(nullptr, space);
-    if(filed == nullptr || strcasecmp(filed, "HTTP/1.1") != 0){
+    if(filed != nullptr && strcasecmp(filed, "HTTP/1.1") != 0){
         fprintf(stderr, "[HTTP PARSE LINE]: %s HTTP version not support\n", filed);
         return BAD_REQUEST;
     }
-    filed = strtok(nullptr, space);
 
+
+    filed = strtok(nullptr, space);
     if(filed != nullptr){
         fprintf(stderr, "[HTTP PARSE LINE]: %s , bad request line\n", filed);
         return BAD_REQUEST;
@@ -129,8 +184,15 @@ HttpRequest::HTTP_STATUS HttpRequest::parseHttpRequestHeader(char *line){
     if(strncasecmp(line, "Host:", 5) == 0){
         line += 5;
         //line指向主机名
-        line += strspn(line, " ");
+        line += strspn(line, " "); //返回第一个与 accept不相同的位置
         this->host = line;
+    }
+    else if(strncasecmp(line, "Connection:", 11) == 0){
+        line += 11;
+        line += strspn(line, " ");
+        if(strncasecmp(line, "close", 5) == 0){
+            this->keep_alive = false;
+        }
     } 
     else{
         //虽然没出现header，但并不代表出错
@@ -229,10 +291,14 @@ HttpRequest::HTTP_STATUS HttpRequest::doRequest(){
 
 bool HttpRequest::makeRespond(const char* http_code, const char* title){
     //添加相应行
-    sprintf(write_buf, "HTTP/1.1 %s %s\r\n\r\n", http_code, title);
-    this->write_size = strnlen(write_buf, BUFFERSZ);
+    this->write_size += sprintf(write_buf, "HTTP/1.1 %s %s\r\n", http_code, title);
+    
     //添加响应头
-    //TODO
+    this->write_size += sprintf(write_buf+this->write_size, "Connection: %s\r\n", this->keep_alive? "keep-alive":"close");
+    
+    //添加空行
+    this->write_size += sprintf(write_buf+this->write_size, "\r\n");
+
     return true;
 }
 
@@ -268,40 +334,6 @@ bool HttpRequest::doRespond(HTTP_STATUS status){
 }
 
 
-void HttpRequest::DoRequest(){
-    
-    //1. 读取数据
-    bool ret = this->read();
-    if(!ret){
-        this->closeConnection();
-        return;
-    }
-
-    //2. 解析数据
-    HTTP_STATUS status = this->parseHttp();
-
-    //3.1 请求头还没有接受完,重新注册sockfd上的读事件(主要是清除EPOLLONESHOT)
-    if(status == NO_REQUEST){
-        modfd(this->epollfd, this->sockfd, EPOLLIN | EPOLLET | EPOLLONESHOT);
-        return;
-    }
-    //3.2 解析结束，doRequest查找对应的请求文件，并映射
-    else if(status == GET_REQUEST){
-        status = this->doRequest();
-    }
-
-    //4. 处理请求
-    this->doRespond(status);
-
-    //5. 写回数据
-    this->write();
-    //6. 写完数据关闭连接
-    this->closeConnection();
-}
-
-void HttpRequest::DoTimer(){
-
-}
 
 //读取当前请求socket上的数据
 //后置条件：根据返回值 1. true: 接着进行后续的请求解析 2.false: 说明读取失败，关闭连接
@@ -340,7 +372,6 @@ bool HttpRequest::write(){
 
     //手动进行集中写
     //如果socket阻塞时，采用轮询的方式，一次请求中一定要将数据发送给客户端
-    fprintf(stderr, "Respond Header: %s\n", this->write_buf);
     while(nleft > 0){
         len = send(this->sockfd, bufp, nleft, 0);
         if(len == -1){
