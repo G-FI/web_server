@@ -9,10 +9,10 @@ int setnonblocking(int fd){
 }
 
 //将fd添加到内核创建的内核事件表epollfd中，将fd设置为非阻塞
-void addfd(int epollfd, int fd, bool one_shot){
+void addfd(int epollfd, int fd,  unsigned int ev, bool one_shot){
     struct epoll_event event;
     event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLET; //监测 数据可读事件 和 边沿触发(事件发生时只触发一次)
+    event.events = ev; //监测 数据可读事件 和 边沿触发(事件发生时只触发一次)
     if(one_shot){
         event.events |= EPOLLONESHOT;
     }
@@ -29,7 +29,7 @@ void modfd(int epollfd, int fd, int ev){
     event.data.fd = fd;
     //EPOLLRDHUP发送简单的数据来监测对端是否已经关闭连接，若监测到EPOLLRDHUP
     //说明对方关闭，服务器端执行关闭操作
-    event.events = ev | EPOLLIN | EPOLLET | EPOLLRDHUP;
+    event.events = ev ;
     epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 

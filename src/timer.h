@@ -152,13 +152,11 @@ public:
             if(this->cur_time >= next_timer->expired_time){
                 timer_heap.pop();
                 //释放锁，处理定时事件，此时该请求一定不会被处理
-                // this->mtx.unlock();
                 lk.unlock();
                 
                 next_timer->request->DoTimer();
 
                 //获取锁继续处理定时事件
-                // this->mtx.lock();
                 lk.lock();
             }
             else{

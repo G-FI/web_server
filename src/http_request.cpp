@@ -1,5 +1,7 @@
 #include "http_request.h"
 #include "util.h"
+#include <thread>
+#define TIEMR_HEAP_ALLOW
 
 const char* HttpRequest::not_found_path = "/home/hpy/var/www/html/not_found.html";
 const char* HttpRequest::root = "/home/hpy/var/www/html";
@@ -10,15 +12,18 @@ HttpRequest::HttpRequest(){
 HttpRequest::~HttpRequest(){}
 
 void HttpRequest::DoRequest(){
+     bool ret;
+    #ifdef TIEMR_HEAP_ALLOW
     //0. 从定时器堆中删除自身定时器
-    bool ret = TimerHeapThreadSafe::GetInstance()->RemoveTimer(this->timer);
+    ret = TimerHeapThreadSafe::GetInstance()->RemoveTimer(this->timer);
     
     if(ret == false){   //该请求已经/正在被定时器处理，请求已过期
         return;
     }
 
-    fprintf(stderr, "Get The Reqeust, Remove the Timer\n");
-   
+    // fprintf(stderr, "Get The Reqeust, Remove the Timer\n");
+    #endif
+    printf("thread: %d < Doing %d \n",std::this_thread::get_id(), this->sockfd);
     //1. 读取数据
     ret = this->read();
     if(!ret){
@@ -31,10 +36,12 @@ void HttpRequest::DoRequest(){
 
     //3.1 请求头还没有接受完,重新注册sockfd上的读事件(主要是清除EPOLLONESHOT)
     if(status == NO_REQUEST){
-        modfd(this->epollfd, this->sockfd, EPOLLIN | EPOLLET | EPOLLONESHOT);  
-        
+        modfd(this->epollfd, this->sockfd, EPOLLIN | EPOLLET | EPOLLERR | EPOLLRDHUP | EPOLLHUP);  
+        #ifdef TIEMR_HEAP_ALLOW
         this->timer->Reset(this, TIME_OUT);
         TimerHeapThreadSafe::GetInstance()->AddTimer(this->timer);
+        #endif
+
         return;
     }
     //3.2 解析结束，doRequest查找对应的请求文件，并映射
@@ -49,20 +56,29 @@ void HttpRequest::DoRequest(){
     this->write();
 
     //6. 写完数据根据是否长连接来决定关闭
+    #ifdef TIEMR_HEAP_ALLOW
     if(this->keep_alive){
         this->timer->Reset(this, TIME_OUT);
         TimerHeapThreadSafe::GetInstance()->AddTimer(this->timer);
+        //重新将该sockfd添加到监听表中
+        modfd(this->epollfd, this->sockfd, EPOLLIN | EPOLLET | EPOLLERR | EPOLLRDHUP | EPOLLHUP);    
     }
     else{
         this->closeConnection();
     }
+    #else
+    this->closeConnection();
+    #endif
 }
 
 void HttpRequest::DoTimer(){
     fprintf(stderr, "[HTTP Connection Timer done]: %d\n ", this->sockfd);
     this->closeConnection();
 }
-
+void HttpRequest::EndRequest(){
+    TimerHeapThreadSafe::GetInstance()->RemoveTimer(this->timer);
+    this->closeConnection();
+}
 
 void HttpRequest::InitRequest(int epollfd, int sockfd, Timer* timer_){
     //fd相关

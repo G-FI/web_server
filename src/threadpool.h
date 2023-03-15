@@ -7,6 +7,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <assert.h>
+#include <iostream>
 
 #include "request.h"
 
@@ -30,7 +31,6 @@ public:
     static ThreadPool* GetInstance(int thread_number = MAX_THREAD, int max_request = MAX_REQUEST){
         if(instance == nullptr){
             instance = new ThreadPool(thread_number, max_request);
-            
         }
         return instance;
     }
@@ -45,7 +45,7 @@ private:
     int                     m_max_request;
     int                     m_thread_number;
     
-    list<Request*>         m_request_queue; //工作队列
+    list<Request*>          m_request_queue; //工作队列
     vector<thread>          m_workers;     //工作线程
 
     condition_variable      m_cond;     

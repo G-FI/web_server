@@ -57,10 +57,7 @@ private:
     //结束时删除注册表中的sockfd，再关闭连接，不需要重置数据，下一次再将请求分给当前对象时，会进行初始化
     
     void closeConnection(){
-        removefd(this->epollfd, this->sockfd);
-        close(this->sockfd);
-        this->epollfd = -1;
-        this->sockfd = -1; 
+
         //有可能正在处理请求中，有映射的文件，但是定时器时间到需要清除
         if(file_addr){
             munmap(this->file_addr, this->file_size);
@@ -73,6 +70,14 @@ private:
             delete this->timer;
         }
         this->timer = nullptr;
+
+        if(this->epollfd != -1){
+            removefd(this->epollfd, this->sockfd);
+            close(this->sockfd);
+            printf("close >: %d\n", this->sockfd);
+        }
+        this->epollfd = -1;
+        this->sockfd = -1; 
     }
     
 private:
@@ -88,9 +93,7 @@ public:
     void InitRequest(int epollfd, int sockfd, Timer* timer_);
     virtual void DoRequest() override;
     virtual void DoTimer() override;
-    void EndRequest(){
-        this->closeConnection();
-    }
+    void EndRequest();
     int             sockfd;
 
 protected:

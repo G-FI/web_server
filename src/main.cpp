@@ -17,6 +17,7 @@
 #include<sys/epoll.h>
 
 #include<sys/wait.h>
+#define TIEMR_HEAP_ALLOW
 
 #include "threadpool.h"
 #include "http_request.h"
@@ -28,8 +29,7 @@
  * 
  * 
 */
-
-
+static int epoll_num =0;
 static int pipefd[2];
 #define MAX_EVENt_NUMBER 1024
 #define MAX_FD 65536
@@ -100,12 +100,12 @@ int accept_conn(int listenfd, int epollfd){
     int conn_fd = accept(listenfd, nullptr, nullptr);
     if(conn_fd <= 0)
         return -1;
-    addfd(epollfd, conn_fd); 
-    
-    Timer* timer = new Timer(requests + conn_fd, TIME_OUT);
+    addfd(epollfd, conn_fd, EPOLLIN | EPOLLET | EPOLLERR | EPOLLRDHUP | EPOLLHUP,  true); 
+    #ifdef TIEMR_HEAP_ALLOW
+    HttpRequest* new_request = requests + conn_fd;
+    Timer* timer = new Timer(new_request, TIME_OUT);
     //初始化请求
     requests[conn_fd].InitRequest(epollfd, conn_fd, timer);
-    
     //添加计时器
     TimerHeapThreadSafe::GetInstance()->AddTimer(timer);
     //如果之前由计时说明已有计时器启动，则继续计时，若没有，则新开启一个计时
@@ -116,6 +116,10 @@ int accept_conn(int listenfd, int epollfd){
     else{
         alarm(pre);
     }
+    #else
+    requests[conn_fd].InitRequest(epollfd, conn_fd, nullptr);
+    #endif
+    return 0;
 }
 
 int main(int argc, char **argv){
@@ -133,12 +137,20 @@ int main(int argc, char **argv){
     assert(epollfd != -1);
 
     //3. 注册epoll监听事件，监听listen端口
-    addfd(epollfd, listenfd, false);
-
+   // addfd(epollfd, listenfd, false);
+    epoll_event event;
+    event.data.fd = listenfd;
+    event.events = EPOLLIN;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, listenfd, &event);
+    setnonblocking(listenfd);
+    addfd(epollfd, listenfd,  EPOLLIN, false);
     //4. 创建客户请求数组，使用sockfd下标访问
     requests = new HttpRequest[MAX_FD];
     //5. 创建线程池
     ThreadPool * pool = ThreadPool::GetInstance(5);
+
+    //查看timer_heap
+    TimerHeapThreadSafe * timer_heap_test = TimerHeapThreadSafe::GetInstance();
 
     int ret = 0;
     //6. 统一事件源
@@ -147,7 +159,7 @@ int main(int argc, char **argv){
 
     //7. 注册信号事件
     addsig(SIGALRM, sig_handler);
-    addfd(epollfd, pipefd[0]);
+    addfd(epollfd, pipefd[0],EPOLLIN | EPOLLET, false);
 
     bool stop_server = false;
     bool time_out = false;
@@ -155,6 +167,7 @@ int main(int argc, char **argv){
         
         time_out = false;
         int number = epoll_wait(epollfd, events, MAX_EVENt_NUMBER, -1);
+        // printf("epoll_number: %d\n", ++epoll_num);
         if(number < 0 && errno != EINTR){ //被信号中断时设置errno为EINTR X, 信号一般开启RESTART，能恢复被中断的系统调用
             printf("epoll_wait failure\n");
             exit(-1);
@@ -196,6 +209,7 @@ int main(int argc, char **argv){
             }
             //客户端连接
             else if(events[i].events & EPOLLIN){
+                //不能添加addfd(epollfd, sockfd, (EPOLLIN | EPOLLERR | EPOLLRDHUP | EPOLLHUP), false);
                 pool->Append(requests + sockfd);
             }
         }
